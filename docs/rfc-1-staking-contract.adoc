@@ -1,0 +1,408 @@
+:toc: macro
+
+= RFC 1: T Staking Contract
+
+:icons: font
+:numbered:
+toc::[]
+
+== Proposal
+
+=== Goal
+
+The goal of this proposal is to specify a simple and secure stake delegation
+mechanism. It should enable T owners to have their wallets offline and their
+stake managed by staking providers on their behalf. All off-chain client software
+should be able to run without exposing staking provider’s private key and should
+not require any owner’s keys at all. The stake delegation should also optimize the
+network throughput without compromising the security of the owners’ stake.
+
+This proposal aims at implementing a minimum viable staking contract version
+allowing to support native T delegations in all applications developed against 
+this staking contract version. The functionality of the staking contract can be 
+further extended by the upgradeability of the contract code.
+
+=== Terminology
+
+Owner:: An address owning T tokens. An owner is the ultimate holder of the tokens.
+Before stake delegation, the owner has full control over the tokens, and the
+tokens are returned to the owner after stake delegation has finished.
+Owner’s participation is not required in the day-to-day operations on the
+stake, so cold storage can be accommodated to the maximum extent.
+
+Staking Provider:: An address of a party authorized to operate in the network on
+behalf of a given owner. The staking provider handles the everyday operations on
+the delegated stake without actually owning the staked tokens. A staking provider
+can not simply transfer away delegated tokens, however, it should be noted that
+the staking provider’s misbehavior may result in slashing tokens and thus the
+entire staked amount is indeed at stake.
+
+Beneficiary:: An address where the rewards for participation are sent, earned by
+the staking provider, on behalf of the owner. A beneficiary doesn’t sign or
+publish any protocol-relevant transactions, but any currency or tokens earned by
+the staking provider will be transferred to the beneficiary.
+
+Authorizer:: An address appointed by an owner to authorize applications on
+behalf of the owner. An application must be approved by the authorizer before the
+staking provider is eligible to participate.
+
+Delegated stake:: An owner’s staked tokens, delegated to the staking provider by 
+the owner. Delegation enables token owners to have their wallets offline and their
+stake operated by staking providers on their behalf.
+
+Application:: An external smart contract or a set of smart contracts utilizing
+functionalities offered by Threshold Network. Example applications are: random
+beacon, proxy re-encryption, and tBTC. Applications authorized for the given
+staking provider are eligible to slash the stake delegated to that staking
+provider.
+
+== Specification
+
+=== Functionality
+
+==== Delegating a stake
+
+Tokens are delegated by the owner. During the delegation, the owner needs to
+appoint a staking provider, beneficiary, and authorizer. The owner may decide to
+delegate just a portion of their tokens. The owner may delegate multiple times
+to different staking providers. For simplicity, the staking provider address can
+not be reused between delegations even if all tokens have been unstaked. To
+protect against griefing by frontrunning stake delegation transactions and
+reserving staking provider addresses, staking contract should require a
+governable minimum stake amount for  each delegation and there should be a
+minimum undelegation delay of 24 hours.
+
+Staking contract binds the owner with the staking provider, beneficiary, and
+authorizer for the given stake delegation and records the stake delegation amount.
+
+The staking contract does not define operator role. The operator responsible for
+running off-chain client software is appointed by the staking provider in the
+particular application contract utilizing the staking contract. All off-chain
+client software should be able to run without exposing operator's or staking
+provider’s private key.
+
+==== Authorizing an application
+
+Before the staking provider is eligible to participate in the given application,
+the authorizer appointed during the stake delegation needs to review the
+application and approve it to use the stake. From the moment of approval, the
+application is authorized to slash or seize the stake.
+
+The authorizer decides up to which amount the given application is eligible to
+slash. This allows managing the risk profile of the staker individually for each
+application. The authorized stake amount can be increased and decreased.
+
+The amount authorized is set individually for each application and should be
+used as a staker's weight in the application: for work selection and rewards.
+The amount authorized for the application can be decreased as a result of
+the application approving authorization decrease request.
+The amount authorized for the application can be also decreased as a result of
+slashing, including slashing executed in the context of another application. 
+
+The application being authorized is notified via a callback every single time
+new authorization happens and the application may decide to revert the
+transaction if individual requirements of the application are not met.
+For example, application may require a certain minimum authorized amount.
+The application is notified every single time the authorization increases or
+decreases. The application can revert this transaction in case some rules
+specific to that application are not met. Inside the callback, the application
+can also update its internal state, such as, for example, the weight of the
+staking provider in the sortition pool.
+
+Authorization decrease is a two-step process. First, the authorizer requests to
+decrease the authorization, and the application is notified about it by
+a callback. In the second step, the application approves the decrease at its own
+discretion. It is up to every individual application to decide if and when the
+authorization decrease gets approved. New authorization decrease request
+overwrites the pending one.
+
+All applications first need to be authorized in a registry of T applications
+controlled by the governance before any authorizer can use them.
+To protect against the attack of blocking the slashing queue by exceeding the
+block gas limit for slashing the particular staking provider, there should be a
+governable limit of applications that can be authorized per staking provider.
+
+==== Stake top-up
+
+Top-up increases the amount of tokens locked in a delegation and allows to later
+increase the authorization for applications. This increases the probability of being
+chosen for work in the application but is only effective for future checks of the
+authorized amount.
+
+Stakes can only be topped-up with liquid T.
+
+Anyone can execute a stake top-up for a staking provider using liquid T.  
+Stake top-up does not automatically increase authorization levels for applications. 
+Stake top-up is a one-step process and does not require any delay.
+
+==== Undelegating a stake (unstaking)
+
+The owner or staking provider may decide to unstake some amount of tokens if the
+amount left on the stake after this operation will be higher or equal to the
+highest authorization amongst all applications. Even if all tokens have been
+unstaked, relationship between owner, staking provider, beneficiary, and
+authorizer is retained in the staking contract in case some applications still
+have some rewards waiting for withdrawal.
+
+If the owner or staking provider attempts to unstake tokens before 24 hours
+passed since the delegation so that the amount left in the contract would be
+below the minimum stake, the transaction reverts.
+
+==== Slashing a stake
+
+Authorized applications can slash or seize a stake. Slash operation decreases
+the stake of a staking provider and burns slashed tokens. Seize decreases the
+stake, burns 95% of the stake, and awards up to 5% to the notifier of misbehavior.
+
+To keep stakes synchronized between applications when staking providers are
+slashed, without the risk of running out of gas, the staking contract queues up
+slashings and let users process the transactions.
+
+When an application slashes one or more staking providers, it adds them to the
+slashing queue on the staking contract. A queue entry contains the stakign
+provider's address and the amount they're due to be slashed.
+
+When there is at least one staking provider in the slashing queue, any account
+can submit a transaction processing one or more staking providers' slashings,
+and collecting a reward for doing so. A queued slashing is processed by updating
+the staking provider's stake to the post-slashing amount, updating authorized
+amount for each affected application, and notifying all affected applications
+that the staking provider's authorized stake has been reduced due to slashing.
+The application must then do the necessary adjustments, such as removing the
+provider from the sortition pool or reducing its weight, changing the provider's
+eligibility for rewards, and so forth.
+
+Every application callback executed as a result of a slash should have a 250k gas
+limit. Slashing are processed in a FIFO basis, and there is just one function
+exposed by the staking contract allowing to slash one or more staking providers
+from the head of the queue. Callback failure does not revert the transaction. In
+case the callback failed, the slashing request is removed from the queue and
+never retried so it is in the application's best interest to ensure it can always
+execute the callback. The same happens if the slash operation fails because
+the given staking provider has insufficient stake to slash.
+
+It is important to note slashing executed in the context of one application may
+lead to involuntarily decreasing the authorization for other applications in 
+case the amount of stake available after the slashing is lower than these
+authorizations.
+
+=== Upgradeability
+
+The staking contract will be upgradeable. The exact upgradeability mechanism is
+out of the scope of this document.
+
+== Public API
+
+=== Delegating a stake
+
+==== `stake(address stakingProvider, address beneficiary, address authorizer, uint96 amount) external` 
+   
+Creates a delegation with `msg.sender` owner with the given staking provider,
+beneficiary, and authorizer. Transfers the given amount of T to the staking
+contract. The owner of the delegation needs to have the amount approved to
+transfer to the staking contract.
+
+==== `setMinimumStakeAmount(uint96 amount) external onlyGovernance`
+
+Allows the governance to set the minimum required stake amount. This amount is
+required to protect against griefing the staking contract and individual
+applications are allowed to require higher minimum stakes if necessary.  
+
+=== Authorizing an application
+
+==== `approveApplication(address application) external onlyGovernance`
+
+Allows the governance to approve the particular application before individual
+stake authorizers are able to authorize it.
+
+==== `increaseAuthorization(address stakingProvider, address application, uint96 amount) external onlyAuthorizerOf(stakingProvider)`
+
+Increases the authorization of the given staking provider for the given application by
+the given amount. Calls `authorizationIncreased(address stakingProvider, uint96 amount)`
+callback on the given application to notify the application. Can only be called
+by the given provider's authorizer.
+
+==== `requestAuthorizationDecrease(address stakingProvider, address application, uint96 amount) external onlyAuthorizerOf(stakingProvider)`
+
+Requests decrease of the authorization for the given staking provider on the given
+application by the provided amount. Calls `authorizationDecreaseRequested(address stakingProvider, uint96 amount)`
+on the application. It does not change the authorized amount. Can only be called
+by the given provider's authorizer. Overwrites pending authorization decrease
+for the given provider and application.
+
+==== `requestAuthorizationDecrease(address stakingProvider) external onlyAuthorizerOf(stakingProvider)`
+
+Requests decrease of all authorizations for the given provider on all 
+applications by all authorized amount. Calls `authorizationDecreaseRequested(address stakingProvider, uint256 amount)`
+for each authorized application. It may not change the authorized amount
+immediatelly.  When it happens depends on the application. Can only be called by
+the given staking provider’s  authorizer. Overwrites pending authorization
+decrease for the given staking provider and  application.
+
+==== `approveAuthorizationDecrease(address stakingProvider) external onlyRequestedApplication returns (uint96)`
+
+Called by the application at its discretion to approve the previously requested
+authorization decrease request. Can only be called by the application that
+was previously requested to decrease the authorization for that staking provider.
+Returns resulting authorized amount for the application.
+
+==== `forceDecreaseAuthorization(address stakingProvider, address application) external`
+
+Decreases the authorization for the given `stakingProvider` on the given disabled 
+`application`, for all authorized amount. Can be called by anyone.
+
+==== `pauseApplication(address application) external onlyPanicButtonOf(application)`
+
+Pauses the given application's eligibility to slash stakes. Besides that stakers can't
+change authorization to the application. Can be called only by a panic button of the 
+particular application. The paused application can not slash stakes until it is 
+approved again by the governance using `approveApplication` function. Should be 
+used only in case of an emergency.
+
+==== `disableApplication(address application) external onlyGovernance`
+
+Disables the given application. The disabled application can't slash stakers. Also 
+stakers can't increase authorization to that application but can decrease without 
+waiting by calling `forceDecreaseAuthorization` at any moment. Can be called only 
+by the governance. The disabled application can't be approved again. Should be used 
+only in case of an emergency.
+
+==== `setPanicButton(address application, address panicButton) external onlyGovernance`
+
+Sets the panic button role for the given application to the provided address.
+Can only be called by the governance. If the panic button for the given
+application should be disabled, the role address should be set to 0x0 address.
+
+==== `setAuthorizationCeiling(uint256 ceiling) external onlyGovernance`
+
+Sets the maximum number of applications one staking provider can authorize. Used to
+protect against DoSing slashing queue. Can only be called by the governance.
+
+=== Stake top-up
+
+==== `topUp(address stakingProvider, uint96 amount) external`
+
+Increases the amount of the stake for the given staking provider.  If `autoIncrease` 
+flag is true then the amount will be added for  all authorized applications.
+The sender of this transaction needs to have the amount approved to transfer 
+to the staking contract.
+
+==== `toggleAutoAuthorizationIncrease(address stakingProvider) external`
+
+Toggle auto authorization increase flag. If true then all amount in top-up 
+will be added to already authorized applications.
+
+=== Undelegating a stake (unstaking)
+
+==== `unstakeT(address stakingProvider, uint96 amount) external onlyOwnerOrStakingProvider(stakingProvider)`
+
+Reduces the T stake amount by `amount` and withdraws `amount` of T 
+to the owner. Reverts if there is at least one authorization higher than the 
+remaining T stake or if the `amount` is higher than the T stake amount. 
+Can be called only by the owner or the staking provider.
+
+=== Keeping information in sync
+
+==== `setNotificationReward(uint96 reward) external onlyGovernance`
+
+Sets reward in T tokens for notification of misbehaviour of one staking provider.
+Can only be called by the governance.
+
+==== `pushNotificationReward(uint96 reward) external`
+
+Transfer some amount of T tokens as reward for notifications of misbehaviour.
+
+==== `withdrawNotificationReward(address recipient, uint96 amount) external onlyGovernance`
+
+Withdraw some amount of T tokens from notifiers treasury. Can only be called by 
+the governance.
+
+=== Slashing a stake
+
+==== `slash(uint96 amount, address[] memory stakingProviders) external onlyAuthorizedApplication`
+
+Adds staking providers to the slashing queue along with the amount that should be
+slashed from each one of them. Can only be called by an authorized application.
+
+==== `seize(uint96 amount, uint256 rewardMultipier, address notifier, address[] memory stakingProviders) external onlyAuthorizedApplication`
+	
+Adds staking providers to the slashing queue along with the amount. The notifier will 
+receive reward per each staking provider from notifiers treasury. Can only be called by 
+application authorized for all staking providers in the array.
+
+==== `processSlashing(uint256 count)`
+
+Takes the `count` of queued slashing operations and processes them. Receives 5%
+of the slashed amount. Executes `involuntaryAuthorizationDecrease` function on 
+each affected application.
+
+=== Auxiliary functions
+
+==== `authorizedStake(address stakingProvider, address application) external view returns (uint96)`
+
+Returns the authorized stake amount of the staking provider for the application.
+
+==== `stakes(address stakingProvider) external view returns (uint96 tStake, uint96 keepInTStake, uint96 nuInTStake)`
+
+Returns staked amount of T for the specified staking provider. 
+Method is deprecated. Use `stakeAmount` instead.
+
+==== `stakeAmount(address stakingProvider) external view returns (uint96)`
+
+Returns staked amount of T for the specified staking provider.
+
+==== `getStartStakingTimestamp(address stakingProvider) external view returns (uint256)`
+
+Returns start staking timestamp for T stake. This value is set at most once, 
+and only when a stake is created with.
+
+
+==== `getAutoIncreaseFlag(address stakingProvider) external view returns (bool)`
+
+Returns auto-increase flag. If flag is true then any topped up amount will be added to
+existing authorizations.
+
+==== `rolesOf(address stakingProvider) external view returns (address owner, address payable beneficiary, address authorizer)`
+
+Gets the stake owner, the beneficiary and the authorizer for the specified 
+staking provider address.
+
+==== `getApplicationsLength() external view returns (uint256)`
+
+Returns length of application array
+
+==== `getSlashingQueueLength() external view returns (uint256)`
+
+Returns length of slashing queue
+
+==== `getMaxAuthorization(address stakingProvider) external view returns (uint96)`
+
+Returns the maximum application authorization.
+
+==== `getAvailableToAuthorize(address stakingProvider, address application) external view returns (uint96)`
+
+Returns available amount to authorize for the specified application
+
+=== Application callbacks
+
+==== `authorizationIncreased(address stakingProvider, uint96 amount)`
+
+Used by T staking contract to inform the application the the authorized amount
+for the given staking provider increased to the given amount. The application
+may do any housekeeping necessary.
+
+==== `authorizationDecreaseRequested(address stakingProvider, uint96 amount)`
+
+Used by T staking contract to inform the application that the given staking
+provider requested to decrease the authorization to the given amount. The
+application should mark the authorization as pending decrease and respond to the
+staking contract with `approveAuthorizationDecrease` at its discretion. It may
+happen right away but it also may happen several months later.
+
+==== `involuntaryAuthorizationDecrease(address stakingProvider, uint96 amount)`
+
+Used by T staking contract to inform the application the authorization has
+been decreased for the given staking provider to the given amount involuntarily,
+as a result of slashing. Lets the application to do any housekeeping neccessary.
+Called with 250k gas limit and does not revert the transaction if 
+`involuntaryAuthorizationDecrease` call failed.
